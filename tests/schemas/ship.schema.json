@@ -19,7 +19,7 @@
     "icon": { "type": "string" },
     "size": {
       "type": "string",
-      "enum": ["Small", "Medium", "Large"]
+      "enum": ["Small", "Medium", "Large", "Huge"]
     },
     "dial": {
       "type": "array",
@@ -27,7 +27,14 @@
         "type": "string",
         "minLength": 3,
         "maxLength": 3,
-        "pattern": "^[0-5][ABDEFKLNOPRSTY][RWB]$"
+        "pattern": "^[0-5][ABDEFKLNOPRSTY][RWBP]$"
+      }
+    },
+    "dialCodes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 2
       }
     },
     "pilots": {

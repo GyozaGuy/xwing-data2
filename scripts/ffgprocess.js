@@ -1,9 +1,10 @@
 /**
- * Processes ffgcards.json downloaded data and updates text (and some other) values in ../data/**
+ * Processes ffgcards-en.json downloaded data and updates text (and some other) values in ../data/**
  */
 
 const fs = require("fs");
 const gitdiff = require("git-diff");
+const stringMath = require("string-math");
 const diffOpts = {
   color: true,
   noHeaders: true,
@@ -13,22 +14,22 @@ const diffOpts = {
 const readFile = pathFromRoot =>
   fs.readFileSync(`${__dirname}/../${pathFromRoot}`, "utf8");
 
-console.log("Reading ./ffgcards.json");
+console.log("Reading ./ffgcards-en.json");
 let dataString = "";
 try {
-  dataString = readFile("scripts/ffgcards.json");
+  dataString = readFile("scripts/ffgcards-en.json");
 } catch (err) {
-  console.log("Could not read ./ffgcards.json. Use ffgscrape.js first!");
+  console.log("Could not read ./ffgcards-en.json. Use ffgscrape.js first!");
   process.exit(1);
 }
 
-console.log("Reading ./ffgmetadata.json");
+console.log("Reading ./ffgmetadata-en.json");
 let metadata = {};
 try {
-  let metadataString = readFile("scripts/ffgmetadata.json");
+  let metadataString = readFile("scripts/ffgmetadata-en.json");
   metadata = JSON.parse(metadataString);
 } catch (err) {
-  console.log("Could not read ./ffgmetadata.json. Use ffgscrape.js first!");
+  console.log("Could not read ./ffgmetadata-en.json. Use ffgscrape.js first!");
   process.exit(1);
 }
 
@@ -100,6 +101,58 @@ function getFaction(id) {
     return faction.name;
   } else {
     return "";
+  }
+}
+
+function parseVariablePointsCost(cost) {
+  const matches = /max\((\d*), ?(.*)\)/.exec(cost);
+  let hasMax = false;
+  let max = false;
+  let expression = cost;
+  if (matches) {
+    hasMax = true;
+    max = parseInt(matches[1], 10);
+    expression = matches[2];
+  }
+  if (cost.includes("{ship_size}")) {
+    const ship_size_values = {
+      Small: 1,
+      Medium: 2,
+      Large: 3
+      // Huge: 4
+    };
+    const values = {};
+    Object.entries(ship_size_values).forEach(([size, value]) => {
+      const result = stringMath(expression.replace("{ship_size}", value));
+      values[size] = Math.max(0, hasMax ? Math.max(max, result) : result);
+    });
+    return {
+      variable: "size",
+      values
+    };
+  } else if (cost.includes("{initiative}")) {
+    const values = {};
+    for (let i = 0; i <= 6; i++) {
+      const result = stringMath(expression.replace("{initiative}", i));
+      values[i] = Math.max(0, hasMax ? Math.max(max, result) : result);
+    }
+    return {
+      variable: "initiative",
+      values
+    };
+  } else if (cost.includes("{statistics:1}")) {
+    // statistics:1 = AGILITY
+    const values = {};
+    for (let i = 0; i <= 3; i++) {
+      const result = stringMath(expression.replace("{statistics:1}", i));
+      values[i] = Math.max(0, hasMax ? Math.max(max, result) : result);
+    }
+    return {
+      variable: "agility",
+      values
+    };
+  } else {
+    throw new Error(`Unknown variable in variable cost: "${cost}"`);
   }
 }
 
@@ -252,8 +305,8 @@ function processCard(card) {
           // Save the filename
           filename = filenameKey;
           // Find the pilot inside the data in the ship file
-          ref = ship.pilots.find(
-            pilot => pilot.ffg == card.id || pilot.name == card.name
+          ref = ship.pilots.find(pilot =>
+            pilot.ffg ? pilot.ffg == card.id : pilot.name == card.name
           );
         }
       }
@@ -330,17 +383,73 @@ function processCard(card) {
 
   let modified = false;
 
-  let cost = card.cost == "*" ? null : { value: parseInt(card.cost) };
+  const intCost = parseInt(card.cost, 10);
+  let cost = { value: intCost };
+  if (card.cost === "*") {
+    cost = null;
+  } else if (Number.isNaN(intCost)) {
+    // Variable cost detected!
+    cost = parseVariablePointsCost(card.cost);
+  }
 
   if (upgradeRef) {
     // For upgrades, some fields are stored in the parent object
     // while other fields are specific to the upgrade card's side
 
-    // Only apply a card name change when looking at side[0]
+    // Card-specific tweaks:
+    //
+    switch (card.id) {
+      case 329:
+        // Outrider [Title] Errata
+        card.ability_text = card.ability_text.replace(
+          "obstructed attack",
+          "attack that is obstructed by an obstacle"
+        );
+        break;
+      case 390:
+        // Lando's Millennium Falcon [Title] doesn't properly capitalize ship name
+        card.ability_text = card.ability_text.replace(
+          "escape craft",
+          "Escape Craft"
+        );
+        break;
+      case 549:
+      case 654:
+        // FFG treats Calibrated Laser Targeting as a Mod/Config, but we use Config/Mod
+        // FFG treats Deuterium Power Cells as Mod/Tech, but we use Tech/Mod
+        card.upgrade_types = card.upgrade_types.reverse();
+        break;
+      case 869:
+        // Slave I [Title] doesn't properly capitalize Full Rear Arc
+        card.ability_text = card.ability_text.replace(
+          "full rear arc",
+          "[Full Rear Arc]"
+        );
+        break;
+    }
+
+    // Only apply a card name or xws change when looking at side[0]
     if (upgradeRef.sides[0] == ref) {
       // Replace `(Open)` and `(Closed)` in dual-side cards
-      const name = card.name.replace(/\((Open|Closed)\)/, "").trim();
+      let name = card.name
+        .replace(
+          /\((Open|Closed|Inactive|Active|Perfected|Cyborg|Attached|Detached)\)/,
+          ""
+        )
+        .trim();
+
+      // Card-specific tweaks:
+      //
+      // Correct name for Palpatine/Sidious
+      if (card.id === 556) {
+        name = "Palpatine/Sidious";
+      }
+
       modified = applyDiff(upgradeRef, "name", name) || modified;
+
+      if (!upgradeRef.xws) {
+        modified = applyDiff(upgradeRef, "xws", generateXWS(name)) || modified;
+      }
     }
     if (cost == null) {
       if (!upgradeRef.cost || !("variable" in upgradeRef.cost)) {
@@ -369,9 +478,20 @@ function processCard(card) {
   } else {
     // Card-specific tweaks:
     //
-    // Odd Ball [BTL-B Y-wing]: Card name is "Oddball" which should be "Odd Ball"
-    if (card.id === 597) {
-      card.name = '"Odd Ball"';
+    if (card.id === 700) {
+      // Mini Chireen [T-70 X-wing]: Card name is "Mini Chereen" which should be "Mini Chireen"
+      card.name = "Nimi Chireen";
+    }
+
+    if (!ref.xws) {
+      modified = applyDiff(ref, "xws", generateXWS(card.name)) || modified;
+    }
+
+    const engagementStat = findStatistic(card.statistics, "engagement");
+    if (engagementStat) {
+      modified =
+        applyDiff(ref, "engagement", parseInt(engagementStat.value, 10)) ||
+        modified;
     }
 
     modified = applyDiff(ref, "name", card.name) || modified;
@@ -388,15 +508,34 @@ function processCard(card) {
   }
 
   modified = applyDiff(ref, "artwork", card.image) || modified;
-  modified = applyDiff(ref, "image", card.card_image) || modified;
+
+  // Unfortunately the new squadbuidler API no longer has full card images :(
+  // modified = applyDiff(ref, "image", card.card_image) || modified;
 
   let card_text = card.ability_text;
 
   // Card-specific tweaks:
   //
-  // Lando [Escape Craft]: Card text is missing the `</shipability>` closing tag
-  if (card.id == 226) {
-    card_text = card_text + "</shipability>";
+  switch (card.id) {
+    case 65:
+      // Norra Wexley [ARC-170 Starfighter]: Ability was changed in errata
+      card_text = card_text.replace("you may ", "");
+      break;
+    case 226:
+      // Lando [Escape Craft]: Card text is missing the `</shipability>` closing tag
+      card_text = card_text + "</shipability>";
+      break;
+    case 801:
+      // Zam Wesell [Firespray]: Quotes are not generated correctly by script
+      card_text = card_text.replace(
+        "You Should Thank Me",
+        '"You Should Thank Me" or'
+      );
+      card_text = card_text.replace(
+        "You'd Better Mean Business",
+        '"You\'d Better Mean Business"'
+      );
+      break;
   }
 
   // Parse card text for shipability text
@@ -524,7 +663,18 @@ metadata["ship_types"].forEach(shipType => {
 // Process every scraped card
 scrapedData["cards"].forEach(card => {
   if (!processCard(card)) {
-    notFound.push({ id: card.id, name: card.name });
+    const type = card.card_type_id === 2 ? "upgrade" : "pilot";
+    const cardData = { ffgId: card.id, name: card.name };
+    if (type === "upgrade") {
+      cardData["slot"] = upgradeTypes.find(
+        upgradeType => upgradeType.ffg == card.upgrade_types[0]
+      ).xws;
+    } else {
+      cardData["ship"] = metadata["ship_types"].find(
+        shipType => shipType.id === card.ship_type
+      ).name;
+    }
+    notFound.push(cardData);
   }
 });
 
@@ -545,4 +695,12 @@ if (modifiedFiles.length) {
       JSON.stringify(data, null, 0)
     );
   });
+}
+
+function findStatistic(statistics = [], id) {
+  return statistics.find(({ ffg_id }) => ffg_id === id);
+}
+
+function generateXWS(str) {
+  return str.toLowerCase().replace(/[^0-9a-z]/g, "");
 }
